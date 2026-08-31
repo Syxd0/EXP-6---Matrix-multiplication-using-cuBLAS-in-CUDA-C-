@@ -45,10 +45,300 @@ Measure the execution time of matrix multiplication using the cuBLAS library wit
 Experiment with varying block sizes (e.g., 16, 32, 64 threads per block) and analyze their effect on execution time.
 Compare the performance of the GPU-based matrix multiplication using cuBLAS with a standard CPU-based matrix multiplication implementation.
 # PROGRAM:
-TYPE YOUR CODE HERE
+cuda_code = r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <cuda_runtime.h>
+#include <cublas_v2.h>
+
+#define index(i, j, ld) (((j) * (ld)) + (i))
+
+// Initialize matrix
+void initializeMatrix(float *matrix, int size)
+{
+    for (int i = 0; i < size; i++)
+    {
+        for (int j = 0; j < size; j++)
+        {
+            matrix[index(i, j, size)] =
+                (float)(i + j) / size;
+        }
+    }
+}
+
+// CPU matrix multiplication
+void cpuMatrixMultiplication(float *A, float *B, float *C, int n)
+{
+    for (int i = 0; i < n; i++)
+    {
+        for (int j = 0; j < n; j++)
+        {
+            C[index(i, j, n)] = 0.0f;
+
+            for (int k = 0; k < n; k++)
+            {
+                C[index(i, j, n)] +=
+                    A[index(i, k, n)] *
+                    B[index(k, j, n)];
+            }
+        }
+    }
+}
+
+int main()
+{
+    int sizes[] = {16, 32, 64};
+    int numSizes = 3;
+
+    for (int s = 0; s < numSizes; s++)
+    {
+        int size = sizes[s];
+
+        printf("\nRunning matrix multiplication for size: %d x %d\n",
+               size, size);
+
+        size_t bytes =
+            (size_t)size * size * sizeof(float);
+
+        // --------------------------------------------------
+        // Host memory allocation
+        // --------------------------------------------------
+        float *A = (float *)malloc(bytes);
+        float *B = (float *)malloc(bytes);
+        float *C_cpu = (float *)malloc(bytes);
+        float *C_gpu = (float *)malloc(bytes);
+
+        if (A == NULL || B == NULL ||
+            C_cpu == NULL || C_gpu == NULL)
+        {
+            printf("Host memory allocation failed!\n");
+            return 1;
+        }
+
+        // Initialize matrices
+        initializeMatrix(A, size);
+        initializeMatrix(B, size);
+
+        // --------------------------------------------------
+        // CPU matrix multiplication
+        // --------------------------------------------------
+        clock_t start_cpu = clock();
+
+        cpuMatrixMultiplication(A, B, C_cpu, size);
+
+        clock_t end_cpu = clock();
+
+        double time_cpu =
+            (double)(end_cpu - start_cpu) / CLOCKS_PER_SEC;
+
+        printf("CPU Matrix Multiplication Time: %f seconds\n",
+               time_cpu);
+
+        // --------------------------------------------------
+        // Device memory allocation
+        // --------------------------------------------------
+        float *d_A;
+        float *d_B;
+        float *d_C;
+
+        cudaMalloc((void **)&d_A, bytes);
+        cudaMalloc((void **)&d_B, bytes);
+        cudaMalloc((void **)&d_C, bytes);
+
+        // --------------------------------------------------
+        // Copy matrices from host to device
+        // --------------------------------------------------
+        cudaMemcpy(
+            d_A,
+            A,
+            bytes,
+            cudaMemcpyHostToDevice
+        );
+
+        cudaMemcpy(
+            d_B,
+            B,
+            bytes,
+            cudaMemcpyHostToDevice
+        );
+
+        // --------------------------------------------------
+        // Create cuBLAS handle
+        // --------------------------------------------------
+        cublasHandle_t handle;
+
+        cublasCreate(&handle);
+
+        float alpha = 1.0f;
+        float beta = 0.0f;
+
+        // --------------------------------------------------
+        // CUDA events for GPU timing
+        // --------------------------------------------------
+        cudaEvent_t start;
+        cudaEvent_t stop;
+
+        cudaEventCreate(&start);
+        cudaEventCreate(&stop);
+
+        cudaDeviceSynchronize();
+
+        cudaEventRecord(start);
+
+        // --------------------------------------------------
+        // cuBLAS matrix multiplication
+        //
+        // C = A x B
+        //
+        // Matrices are stored in column-major order.
+        // --------------------------------------------------
+        cublasSgemm(
+            handle,
+            CUBLAS_OP_N,
+            CUBLAS_OP_N,
+            size,
+            size,
+            size,
+            &alpha,
+            d_B,
+            size,
+            d_A,
+            size,
+            &beta,
+            d_C,
+            size
+        );
+
+        cudaEventRecord(stop);
+        cudaEventSynchronize(stop);
+
+        // --------------------------------------------------
+        // Calculate GPU execution time
+        // --------------------------------------------------
+        float time_gpu;
+
+        cudaEventElapsedTime(
+            &time_gpu,
+            start,
+            stop
+        );
+
+        printf(
+            "GPU Matrix Multiplication Time (cuBLAS): %f milliseconds\n",
+            time_gpu
+        );
+
+        // --------------------------------------------------
+        // Copy result from GPU to CPU
+        // --------------------------------------------------
+        cudaMemcpy(
+            C_gpu,
+            d_C,
+            bytes,
+            cudaMemcpyDeviceToHost
+        );
+
+        // --------------------------------------------------
+        // Verify results
+        // --------------------------------------------------
+        int errors = 0;
+        float max_relative_error = 1e-4f;
+
+        for (int i = 0; i < size * size; i++)
+        {
+            float denominator =
+                fmaxf(
+                    fabsf(C_cpu[i]),
+                    fabsf(C_gpu[i])
+                );
+
+            float relative_error;
+
+            if (denominator > 0.0f)
+            {
+                relative_error =
+                    fabsf(C_cpu[i] - C_gpu[i])
+                    / denominator;
+            }
+            else
+            {
+                relative_error = 0.0f;
+            }
+
+            if (relative_error > max_relative_error)
+            {
+                errors++;
+            }
+        }
+
+        if (errors == 0)
+        {
+            printf(
+                "Results verified successfully for size %d x %d\n",
+                size,
+                size
+            );
+        }
+        else
+        {
+            printf(
+                "Discrepancies found in the results for size %d x %d\n",
+                size,
+                size
+            );
+
+            printf("Number of errors: %d\n", errors);
+        }
+
+        // --------------------------------------------------
+        // Cleanup CUDA resources
+        // --------------------------------------------------
+        cudaEventDestroy(start);
+        cudaEventDestroy(stop);
+
+        cublasDestroy(handle);
+
+        cudaFree(d_A);
+        cudaFree(d_B);
+        cudaFree(d_C);
+
+        // --------------------------------------------------
+        // Cleanup host memory
+        // --------------------------------------------------
+        free(A);
+        free(B);
+        free(C_cpu);
+        free(C_gpu);
+    }
+
+    return 0;
+}
+'''
+
+# Save CUDA code
+with open("matrix_multiplication.cu", "w") as file:
+    file.write(cuda_code)
+
+print("CUDA source file created successfully.")
 
 # OUTPUT:
-SHOW YOUR OUTPUT HERE
+
+Running matrix multiplication for size: 16 x 16
+CPU Matrix Multiplication Time: 0.000032 seconds
+GPU Matrix Multiplication Time (cuBLAS): 62.415134 milliseconds
+Results verified successfully for size 16 x 16
+
+Running matrix multiplication for size: 32 x 32
+CPU Matrix Multiplication Time: 0.000166 seconds
+GPU Matrix Multiplication Time (cuBLAS): 11.406784 milliseconds
+Results verified successfully for size 32 x 32
+
+Running matrix multiplication for size: 64 x 64
+CPU Matrix Multiplication Time: 0.001226 seconds
+GPU Matrix Multiplication Time (cuBLAS): 0.080224 milliseconds
+Results verified successfully for size 64 x 64
 
 # RESULT:
 
